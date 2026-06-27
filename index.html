@@ -872,11 +872,9 @@ function openInvitation() {
   if (opened) return;
   opened = true;
 
-  /* Unlock audio synchronously inside gesture — critical for iOS */
-  iosUnlockAudio();
-
-  /* Click sound */
-  playClickSfx();
+  /* Unlock audio synchronously inside gesture — critical for iOS.
+     playClickSfx runs inside callback so context is running first. */
+  unlockAudio(function() { playClickSfx(); });
 
   var svg  = document.getElementById('rose-svg');
   var rect = svg.getBoundingClientRect();
@@ -920,7 +918,7 @@ function openInvitation() {
   }, 360);
 }
 
-intro.addEventListener('touchstart', function() { iosUnlockAudio(); }, { passive: true });
+intro.addEventListener('touchstart', function() { unlockAudio(null); }, { passive: true });
 intro.addEventListener('click', openInvitation);
 intro.addEventListener('keydown', function (e) {
   if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openInvitation(); }
@@ -937,38 +935,42 @@ document.addEventListener('click', function(e) {
    SOUND EFFECTS  (tap + petal flutter)
 ══════════════════════════════════════ */
 var sfxAc = null;
+var audioUnlocked = false;
 
 function getSfxAc() {
-  if (!sfxAc) {
-    sfxAc = new (window.AudioContext || window.webkitAudioContext)();
-  }
-  /* iOS requires explicit resume every time context is suspended */
-  if (sfxAc.state === 'suspended') sfxAc.resume();
+  if (!sfxAc) sfxAc = new (window.AudioContext || window.webkitAudioContext)();
   return sfxAc;
 }
 
-/* iOS audio unlock — must create + resume AudioContext synchronously
-   inside a direct user-gesture handler. Call this on every touch/click. */
-function iosUnlockAudio() {
+/* iOS audio unlock — synchronously create context + play silent buffer,
+   then wait for resume() Promise before running the callback.
+   On iOS, audio only works after resume() resolves. */
+function unlockAudio(callback) {
   try {
-    if (!sfxAc) {
-      sfxAc = new (window.AudioContext || window.webkitAudioContext)();
+    if (!sfxAc) sfxAc = new (window.AudioContext || window.webkitAudioContext)();
+    var ac = sfxAc;
+    function doUnlock() {
+      /* silent 1-frame buffer — the iOS unlock trick */
+      var buf = ac.createBuffer(1, 1, ac.sampleRate);
+      var src = ac.createBufferSource();
+      src.buffer = buf; src.connect(ac.destination); src.start(0);
+      audioUnlocked = true;
+      if (callback) callback();
     }
-    if (sfxAc.state === 'suspended') sfxAc.resume();
-    /* Play a silent buffer — required on some iOS versions to fully unlock */
-    var buf = sfxAc.createBuffer(1, 1, 22050);
-    var src = sfxAc.createBufferSource();
-    src.buffer = buf;
-    src.connect(sfxAc.destination);
-    src.start(0);
-  } catch(e) {}
+    if (ac.state === 'running') {
+      doUnlock();
+    } else {
+      ac.resume().then(doUnlock).catch(function() { if (callback) callback(); });
+    }
+  } catch(e) { if (callback) callback(); }
 }
 
 /* Cute minimal bell chime — two-tone sparkle */
 function playClickSfx() {
   try {
     var ac  = getSfxAc();
-    var now = ac.currentTime;
+    /* Small offset ensures audio is scheduled after context finishes resuming on iOS */
+    var now = ac.currentTime + 0.05;
     /* Primary bell tone */
     var o1 = ac.createOscillator(), e1 = ac.createGain();
     o1.type = 'sine'; o1.frequency.value = 1318; /* E6 — bright, sweet */
@@ -1006,7 +1008,7 @@ function playScratch() {
   lastScratchT = now;
   try {
     var ac = getSfxAc();
-    var t  = ac.currentTime;
+    var t  = ac.currentTime + 0.02;
     var bufLen = Math.floor(ac.sampleRate * 0.045);
     var buf = ac.createBuffer(1, bufLen, ac.sampleRate);
     var d = buf.getChannelData(0);
@@ -1033,36 +1035,34 @@ var earlyBirdsStarted = false;
 function startEarlyBirds() {
   if (earlyBirdsStarted) return;
   earlyBirdsStarted = true;
-  try {
-    /* Reuse already-unlocked context so iOS doesn't block a fresh one */
-    var ac = getSfxAc();
-    var earlyReverb = buildReverb(ac, 3.5, 1.4);
-    var earlyOut = ac.createGain(); earlyOut.gain.value = 0.55;
-    earlyReverb.connect(earlyOut); earlyOut.connect(ac.destination);
-    var bFreqs = [2200, 2800, 1900, 3100, 2500, 2600, 1700];
-    function earlyChirp() {
-      if (ac.state === 'suspended') ac.resume();
-      var f = bFreqs[Math.floor(Math.random() * bFreqs.length)];
-      chirp(ac, earlyOut, earlyReverb, f);
-      if (Math.random() > 0.5) setTimeout(function() { chirp(ac, earlyOut, earlyReverb, f * (0.9 + Math.random() * 0.2)); }, 400);
-    }
-    function scheduleEarly() {
-      if (earlyBirdsStarted && !musicState.started) {
-        setTimeout(function() { earlyChirp(); scheduleEarly(); }, 4000 + Math.random() * 5000);
+  unlockAudio(function() {
+    try {
+      var ac = getSfxAc();
+      var earlyReverb = buildReverb(ac, 3.5, 1.4);
+      var earlyOut = ac.createGain(); earlyOut.gain.value = 0.55;
+      earlyReverb.connect(earlyOut); earlyOut.connect(ac.destination);
+      var bFreqs = [2200, 2800, 1900, 3100, 2500, 2600, 1700];
+      function earlyChirp() {
+        var f = bFreqs[Math.floor(Math.random() * bFreqs.length)];
+        chirp(ac, earlyOut, earlyReverb, f);
+        if (Math.random() > 0.5) setTimeout(function() { chirp(ac, earlyOut, earlyReverb, f * (0.9 + Math.random() * 0.2)); }, 400);
       }
-    }
-    /* First chirp after short pause, then keep going until music takes over */
-    setTimeout(function() { earlyChirp(); scheduleEarly(); }, 1200);
-  } catch(e) {}
+      function scheduleEarly() {
+        if (earlyBirdsStarted && !musicState.started) {
+          setTimeout(function() { earlyChirp(); scheduleEarly(); }, 4000 + Math.random() * 5000);
+        }
+      }
+      setTimeout(function() { earlyChirp(); scheduleEarly(); }, 1200);
+    } catch(e) {}
+  });
 }
 ['mousemove','touchstart','pointerdown'].forEach(function(ev) {
   document.addEventListener(ev, startEarlyBirds, { once: true, passive: true });
 });
 
-/* iOS: re-resume AudioContext on every touch in case iOS suspends it mid-session */
+/* iOS: re-unlock on every touch — iOS can suspend AudioContext mid-session */
 document.addEventListener('touchstart', function() {
-  if (sfxAc && sfxAc.state === 'suspended') sfxAc.resume();
-  if (musicState.ac && musicState.ac.state === 'suspended') musicState.ac.resume();
+  if (sfxAc && sfxAc.state === 'suspended') unlockAudio(null);
 }, { passive: true });
 
 function buildReverb(ac, dur, decay) {
@@ -1154,11 +1154,11 @@ function startMusic() {
   if (musicState.started) return;
   musicState.started = true;
 
-  /* Reuse existing AudioContext if birds already started it */
-  /* Always reuse the already-gesture-unlocked context (critical for iOS) */
   var ac = getSfxAc();
   musicState.ac = ac;
   sfxAc = ac;
+  /* Ensure context is running before scheduling any nodes */
+  if (ac.state === 'suspended') { ac.resume(); }
 
   var master = ac.createGain();
   master.gain.value = 0;
