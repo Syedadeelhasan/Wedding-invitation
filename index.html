@@ -918,7 +918,6 @@ function openInvitation() {
   }, 360);
 }
 
-intro.addEventListener('touchstart', function() { unlockAudio(null); }, { passive: true });
 intro.addEventListener('click', openInvitation);
 intro.addEventListener('keydown', function (e) {
   if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openInvitation(); }
@@ -947,7 +946,10 @@ function getSfxAc() {
    On iOS, audio only works after resume() resolves. */
 function unlockAudio(callback) {
   try {
-    if (!sfxAc) sfxAc = new (window.AudioContext || window.webkitAudioContext)();
+    /* If context was closed (Chrome iOS can do this), create a fresh one */
+    if (!sfxAc || sfxAc.state === 'closed') {
+      sfxAc = new (window.AudioContext || window.webkitAudioContext)();
+    }
     var ac = sfxAc;
     function doUnlock() {
       /* silent 1-frame buffer — the iOS unlock trick */
@@ -1056,12 +1058,13 @@ function startEarlyBirds() {
     } catch(e) {}
   });
 }
-['mousemove','touchstart','pointerdown'].forEach(function(ev) {
+/* touchend and click are reliably recognized as user gestures by Chrome on iOS */
+['touchend','click','mousemove'].forEach(function(ev) {
   document.addEventListener(ev, startEarlyBirds, { once: true, passive: true });
 });
 
-/* iOS: re-unlock on every touch — iOS can suspend AudioContext mid-session */
-document.addEventListener('touchstart', function() {
+/* Re-unlock on touchend — Chrome iOS may suspend AudioContext between interactions */
+document.addEventListener('touchend', function() {
   if (sfxAc && sfxAc.state === 'suspended') unlockAudio(null);
 }, { passive: true });
 
